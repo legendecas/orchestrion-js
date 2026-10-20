@@ -20,6 +20,17 @@ export interface TransformOutput {
 }
 
 /**
+ * Options for a transformation operation
+ */
+export interface TransformOptions {
+    /**
+     * Path of the file being transformed, used as the source name in the
+     * generated sourcemap. Defaults to `<moduleName>/<filePath>`.
+     */
+    sourceFile?: string;
+}
+
+/**
  * The kind of function
  */
 export type FunctionKind = "Sync" | "Async" | "Callback" | "Auto";
@@ -172,5 +183,10 @@ export class Transformer {
    * # Errors
    * Returns an error if the transformation fails to find injection points.
    */
-  transform(code: string | Buffer, moduleType: ModuleType, sourcemap?: string | object | null): TransformOutput;
+  transform(
+    code: string | Buffer,
+    moduleType: ModuleType,
+    sourcemap?: string | object | null,
+    options?: TransformOptions
+  ): TransformOutput;
 }

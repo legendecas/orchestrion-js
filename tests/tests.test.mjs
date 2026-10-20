@@ -6,7 +6,7 @@ import { readFileSync, writeFileSync, rmSync, existsSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { SourceMapConsumer } from 'source-map'
+import { SourceMapConsumer, SourceMapGenerator } from 'source-map'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -774,6 +774,101 @@ describe('source_map', () => {
     const { map } = transformer.transform(code, 'esm', inputSourceMap)
 
     assert.equal(JSON.parse(map).file, `${TEST_MODULE_NAME}/${TEST_MODULE_PATH}`)
+  })
+
+  test('embeds the original source', () => {
+    const code = 'async function fetch (url) { return 42; }\nmodule.exports = { fetch };'
+
+    const instrumentor = create([
+      {
+        channelName: 'fetch_sm',
+        module: { name: TEST_MODULE_NAME, versionRange: '>=0.0.1', filePath: TEST_MODULE_PATH },
+        functionQuery: { functionName: 'fetch', kind: 'Async' },
+      },
+    ])
+    const transformer = instrumentor.getTransformer(TEST_MODULE_NAME, TEST_MODULE_VERSION, TEST_MODULE_PATH)
+    const { map } = transformer.transform(code, 'cjs')
+
+    const { sources, sourcesContent } = JSON.parse(map)
+    assert.deepEqual(sources, [`${TEST_MODULE_NAME}/${TEST_MODULE_PATH}`])
+    assert.deepEqual(sourcesContent, [code])
+  })
+
+  test('uses `sourceFile` as the source name', () => {
+    const code = 'async function fetch (url) { return 42; }\nmodule.exports = { fetch };'
+    const sourceFile = `/app/node_modules/${TEST_MODULE_NAME}/${TEST_MODULE_PATH}`
+
+    const instrumentor = create([
+      {
+        channelName: 'fetch_sm',
+        module: { name: TEST_MODULE_NAME, versionRange: '>=0.0.1', filePath: TEST_MODULE_PATH },
+        functionQuery: { functionName: 'fetch', kind: 'Async' },
+      },
+    ])
+    const transformer = instrumentor.getTransformer(TEST_MODULE_NAME, TEST_MODULE_VERSION, TEST_MODULE_PATH)
+    const { map } = transformer.transform(code, 'cjs', null, { sourceFile })
+
+    const { sources, sourcesContent } = JSON.parse(map)
+    assert.deepEqual(sources, [sourceFile])
+    assert.deepEqual(sourcesContent, [code])
+  })
+
+  test('chains through an input sourcemap when `sourceFile` is set', () => {
+    // An earlier loader removed the two comment lines from `original`,
+    // so line N of `intermediate` is line N + 2 of `original`.
+    const original = [
+      '// comment 1',
+      '// comment 2',
+      'async function fetch (url) {',
+      '  return 42;',
+      '}',
+      'module.exports = { fetch };',
+    ].join('\n')
+    const intermediate = original.split('\n').slice(2).join('\n')
+    const inputMap = new SourceMapGenerator({ file: 'intermediate.js' })
+    intermediate.split('\n').forEach((line, i) => {
+      // Map every column, so any lookup gets an exact answer.
+      for (let column = 0; column < line.length; column++) {
+        inputMap.addMapping({
+          source: 'original.js',
+          original: { line: i + 3, column },
+          generated: { line: i + 1, column },
+        })
+      }
+    })
+    inputMap.setSourceContent('original.js', original)
+    const sourceFile = `/app/node_modules/${TEST_MODULE_NAME}/${TEST_MODULE_PATH}`
+
+    const instrumentor = create([
+      {
+        channelName: 'fetch_sm',
+        module: { name: TEST_MODULE_NAME, versionRange: '>=0.0.1', filePath: TEST_MODULE_PATH },
+        functionQuery: { functionName: 'fetch', kind: 'Async' },
+      },
+    ])
+    const transformer = instrumentor.getTransformer(TEST_MODULE_NAME, TEST_MODULE_VERSION, TEST_MODULE_PATH)
+    const { code, map } = transformer.transform(intermediate, 'cjs', inputMap.toString(), { sourceFile })
+
+    const parsed = JSON.parse(map)
+    // `sourceFile` names the real file on disk, so the map must not
+    // claim that file holds the intermediate code.
+    const sourceFileIndex = parsed.sources.indexOf(sourceFile)
+    if (sourceFileIndex !== -1) {
+      assert.notEqual(parsed.sourcesContent?.[sourceFileIndex], intermediate)
+    }
+
+    // `42` in the output must map to `42` in `original` (line 4,
+    // column 9), not to its position in `intermediate`.
+    const lines = code.split('\n')
+    const line = lines.findIndex(l => l.includes('return 42')) + 1
+    assert.ok(line > 0)
+    const column = lines[line - 1].indexOf('42')
+    const consumer = new SourceMapConsumer(parsed)
+    const pos = consumer.originalPositionFor({ line, column })
+    assert.deepEqual(
+      { source: pos.source, line: pos.line, column: pos.column },
+      { source: 'original.js', line: 4, column: 9 }
+    )
   })
 })
 
